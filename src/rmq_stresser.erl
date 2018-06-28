@@ -24,7 +24,7 @@ run({RepoName, User, Pass}) ->
         port = 5672,
         channel_max = 2047,
         frame_max = 0,
-        heartbeat = 0
+        heartbeat = 30
     },
 
     {ok, Connection} = amqp_connection:start(Params),
