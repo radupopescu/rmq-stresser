@@ -3,7 +3,7 @@
 -include_lib("amqp_client/include/amqp_client.hrl").
 
 %% API exports
--export([main/1, run/1, stop/1, run_many/2, stop_many/1]).
+-export([main/1, run/2, stop/1, run_many/2, stop_many/1]).
 
 %%====================================================================
 %% API functions
@@ -15,7 +15,7 @@ main(Args) ->
     erlang:halt(0).
 
 
-run({RepoName, User, Pass}) ->
+run({RepoName, User, Pass}, Parent) ->
     Params = #amqp_params_network {
         username = User,
         password = Pass,
@@ -38,19 +38,20 @@ run({RepoName, User, Pass}) ->
     },
     #'queue.bind_ok'{} = amqp_channel:call(Channel, Binding),
 
-    Pid = spawn(fun() -> loop(Channel, 1) end),
-
     Sub = #'basic.consume'{queue = Queue},
-    #'basic.consume_ok'{consumer_tag = _Tag} = amqp_channel:subscribe(Channel, Sub, Pid),
+    #'basic.consume_ok'{consumer_tag = _Tag} = amqp_channel:subscribe(Channel, Sub, self()),
 
-    {Channel, Connection}.
+    Parent ! {Channel, Connection},
+
+    subscription_loop(Channel, 1).
 
 
 run_many(Creds, N) ->
-    T0 = erlang:monotonic_time(second),
-    Hds = run_many_helper(Creds, 0, N, []),
-    T1 = erlang:monotonic_time(second),
-    io:format("Started ~p consumer processes in ~ps.~n", [length(Hds), T1 - T0]),
+    T0 = erlang:monotonic_time(millisecond),
+    run_many_helper(Creds, self(), 0, N),
+    Hds = startup_loop([], N),
+    T1 = erlang:monotonic_time(millisecond),
+    io:format("Started ~p consumer processes in ~pms.~n", [length(Hds), T1 - T0]),
     Hds.
 
 
@@ -61,18 +62,19 @@ stop({Channel, Connection}) ->
 
 
 stop_many(Handles) ->
-    lists:foreach(fun(Hd) -> stop(Hd) end, Handles).
+    lists:foreach(fun(Hd) -> spawn(fun() -> stop(Hd) end) end, Handles).
 
 
 %%====================================================================
 %% Internal functions
 %%====================================================================
 
-loop(Channel, Idx) ->
+
+subscription_loop(Channel, Idx) ->
     receive
         %% This is the first message received
         #'basic.consume_ok'{} ->
-            loop(Channel, Idx);
+            subscription_loop(Channel, Idx);
 
         %% This is received when the subscription is cancelled
         #'basic.cancel_ok'{} ->
@@ -89,12 +91,27 @@ loop(Channel, Idx) ->
             amqp_channel:cast(Channel, #'basic.ack'{delivery_tag = Tag}),
 
             %% Loop
-            loop(Channel, Idx + 1)
+            subscription_loop(Channel, Idx + 1)
     end.
 
-run_many_helper(Creds, Idx, N, Hds) when Idx < N ->
-    Hd = run(Creds),
-    run_many_helper(Creds, Idx + 1, N, [Hd | Hds]);
-run_many_helper(_Creds, Idx, N, Hds) when Idx == N ->
-    Hds.
+
+startup_loop(Hds, N) ->
+    NumHds = length(Hds),
+    case NumHds == N of
+        true ->
+            Hds;
+        false ->
+            receive
+                Hd when NumHds < N ->
+                    io:format("Started ~p~n", [Hd]),
+                    startup_loop([Hd | Hds], N)
+            end
+    end.
+
+
+run_many_helper(Creds, Parent, Idx, N) when Idx < N ->
+    spawn(fun() -> run(Creds, Parent) end),
+    run_many_helper(Creds, Parent, Idx + 1, N);
+run_many_helper(_Creds, _Parent, Idx, N) when Idx == N ->
+    ok.
 
