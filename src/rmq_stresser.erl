@@ -47,8 +47,10 @@ run({RepoName, User, Pass}) ->
 
 
 run_many(Creds, N) ->
+    T0 = erlang:monotonic_time(second),
     Hds = run_many_helper(Creds, 0, N, []),
-    io:format("Started ~p consumer processes.~n", [length(Hds)]),
+    T1 = erlang:monotonic_time(second),
+    io:format("Started ~p consumer processes in ~ps.~n", [length(Hds), T1 - T0]),
     Hds.
 
 
@@ -80,8 +82,8 @@ loop(Channel, Idx) ->
         {#'basic.deliver'{delivery_tag = Tag}, _Content} ->
             %% Do something with the message payload
             %% (some work here)
-            %io:format("~p received message (#~p)~n", [self(), Idx]),
-            %%io:format("Message received: ~p", [Content]),
+            io:format("~p received message (#~p)~n", [self(), Idx]),
+            %io:format("Message received: ~p", [Content]),
 
             %% Ack the message
             amqp_channel:cast(Channel, #'basic.ack'{delivery_tag = Tag}),
@@ -92,7 +94,6 @@ loop(Channel, Idx) ->
 
 run_many_helper(Creds, Idx, N, Hds) when Idx < N ->
     Hd = run(Creds),
-    %timer:sleep(10),
     run_many_helper(Creds, Idx + 1, N, [Hd | Hds]);
 run_many_helper(_Creds, Idx, N, Hds) when Idx == N ->
     Hds.
