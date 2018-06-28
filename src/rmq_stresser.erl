@@ -39,11 +39,11 @@ run({RepoName, User, Pass}, Parent) ->
     #'queue.bind_ok'{} = amqp_channel:call(Channel, Binding),
 
     Sub = #'basic.consume'{queue = Queue},
-    #'basic.consume_ok'{consumer_tag = _Tag} = amqp_channel:subscribe(Channel, Sub, self()),
+    #'basic.consume_ok'{consumer_tag = Tag} = amqp_channel:subscribe(Channel, Sub, self()),
 
-    Parent ! {Channel, Connection},
+    Parent ! {Tag, Channel, Connection},
 
-    subscription_loop(Channel, 1).
+    subscription_loop(Parent, Channel, 0).
 
 
 run_many(Creds, N) ->
@@ -55,14 +55,17 @@ run_many(Creds, N) ->
     Hds.
 
 
-stop({Channel, Connection}) ->
+stop({Tag, Channel, Connection}) ->
+    amqp_channel:call(Channel, #'basic.cancel'{consumer_tag = Tag}),
     amqp_channel:close(Channel),
     amqp_connection:close(Connection),
     ok.
 
 
 stop_many(Handles) ->
-    lists:foreach(fun(Hd) -> spawn(fun() -> stop(Hd) end) end, Handles).
+    lists:foreach(fun(Hd) -> spawn(fun() -> stop(Hd) end), timer:sleep(1) end, Handles),
+    Indices = shutdown_loop(sets:new(), 0, length(Handles)),
+    io:format("Number of messages received by subscribers: ~p~n", [sets:to_list(Indices)]).
 
 
 %%====================================================================
@@ -70,28 +73,28 @@ stop_many(Handles) ->
 %%====================================================================
 
 
-subscription_loop(Channel, Idx) ->
+subscription_loop(Parent, Channel, Idx) ->
     receive
         %% This is the first message received
         #'basic.consume_ok'{} ->
-            subscription_loop(Channel, Idx);
+            subscription_loop(Parent, Channel, Idx);
 
         %% This is received when the subscription is cancelled
         #'basic.cancel_ok'{} ->
-            ok;
+            Parent ! Idx;
 
         %% A delivery
         {#'basic.deliver'{delivery_tag = Tag}, _Content} ->
             %% Do something with the message payload
             %% (some work here)
-            io:format("~p received message (#~p)~n", [self(), Idx]),
+            io:format("~p received message (#~p)~n", [self(), Idx + 1]),
             %io:format("Message received: ~p", [Content]),
 
             %% Ack the message
             amqp_channel:cast(Channel, #'basic.ack'{delivery_tag = Tag}),
 
             %% Loop
-            subscription_loop(Channel, Idx + 1)
+            subscription_loop(Parent, Channel, Idx + 1)
     end.
 
 
@@ -102,15 +105,28 @@ startup_loop(Hds, N) ->
             Hds;
         false ->
             receive
-                Hd when NumHds < N ->
+                Hd ->
                     io:format("Started ~p~n", [Hd]),
                     startup_loop([Hd | Hds], N)
             end
     end.
 
 
+shutdown_loop(Idxs, Complete, N) ->
+    case Complete == N of
+        true ->
+            Idxs;
+        false ->
+            receive
+                Idx ->
+                    shutdown_loop(sets:add_element(Idx, Idxs), Complete + 1, N)
+            end
+    end.
+
+
 run_many_helper(Creds, Parent, Idx, N) when Idx < N ->
     spawn(fun() -> run(Creds, Parent) end),
+    timer:sleep(1),
     run_many_helper(Creds, Parent, Idx + 1, N);
 run_many_helper(_Creds, _Parent, Idx, N) when Idx == N ->
     ok.
